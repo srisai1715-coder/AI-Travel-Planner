@@ -28,7 +28,7 @@ Travel Pipeline
     ├── Itinerary
     └── Restaurants
     ↓
-NVIDIA LLM
+Groq LLM
     ↓
 Structured AI Travel Plan
     ↓
@@ -36,8 +36,10 @@ Frontend
 """
 
 from datetime import date
+import os
 from typing import Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -46,6 +48,8 @@ from backend.tools.geocoding import reverse_geocode
 from backend.services.travel_pipeline import (
     build_travel_place_dataset,
 )
+
+load_dotenv()
 
 
 # ============================================================
@@ -57,23 +61,49 @@ app = FastAPI(
     description=(
         "Backend API for an AI-powered travel planner "
         "using places, weather, routes, restaurants "
-        "and an NVIDIA-hosted LLM."
+        "and a Groq-hosted LLM."
     ),
-    version="1.0.0",
+    version="2.0.0",
 )
 
 
 # ============================================================
-# CORS
+# CORS (VERCEL + EXTERNAL WEBSITES + LOCAL DEV)
 # ============================================================
+# Set ALLOWED_ORIGINS in .env or Render as a comma-separated list, e.g.:
+# ALLOWED_ORIGINS=https://your-app.vercel.app,https://other-site.com,http://localhost:5173
+# Or set ALLOWED_ORIGINS=* to allow any website to call the API.
+
+_default_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
+
+if _raw_origins == "*":
+    allowed_origins = ["*"]
+    allow_credentials = False
+elif _raw_origins:
+    allowed_origins = list(
+        dict.fromkeys(
+            [
+                origin.strip().rstrip("/")
+                for origin in _raw_origins.split(",")
+                if origin.strip()
+            ]
+            + _default_origins
+        )
+    )
+    allow_credentials = True
+else:
+    allowed_origins = _default_origins
+    allow_credentials = True
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -221,7 +251,9 @@ def root():
 
     return {
         "message": "AI Travel Planner API is running",
-        "version": "1.0.0",
+        "version": "2.0.0",
+        "provider": "groq",
+        "model": os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
         "status": "healthy",
     }
 
@@ -235,6 +267,9 @@ def health_check():
 
     return {
         "status": "healthy",
+        "provider": "groq",
+        "model": os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+        "groq_api_key_configured": bool(os.getenv("GROQ_API_KEY")),
     }
 
 

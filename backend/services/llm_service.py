@@ -1,11 +1,11 @@
 """
 LLM Service
-Uses NVIDIA NIM with an OpenAI-compatible API.
+Uses Groq with an OpenAI-compatible API.
 
 Responsibilities:
-1. Load NVIDIA API configuration.
-2. Test NVIDIA connection.
-3. Send grounded travel data to the LLM.
+1. Load Groq API configuration.
+2. Test Groq connection.
+3. Send compact, grounded travel data to the LLM within TPM limits.
 4. Generate a structured AI travel plan.
 5. Include nearby restaurants inside the relevant itinerary day.
 6. Include attraction, meal, daily, and complete-trip budget estimates.
@@ -13,6 +13,7 @@ Responsibilities:
 
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -25,35 +26,35 @@ from openai import OpenAI
 
 load_dotenv()
 
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-NVIDIA_MODEL = os.getenv(
-    "NVIDIA_MODEL",
-    "openai/gpt-oss-20b",
+GROQ_MODEL = os.getenv(
+    "GROQ_MODEL",
+    "openai/gpt-oss-120b",
 )
 
-NVIDIA_BASE_URL = os.getenv(
-    "NVIDIA_BASE_URL",
-    "https://integrate.api.nvidia.com/v1",
+GROQ_BASE_URL = os.getenv(
+    "GROQ_BASE_URL",
+    "https://api.groq.com/openai/v1",
 )
 
 
 # ============================================================
-# NVIDIA CLIENT
+# GROQ CLIENT
 # ============================================================
 
-def get_nvidia_client() -> OpenAI:
-    """Create and return the NVIDIA OpenAI-compatible client."""
+def get_groq_client() -> OpenAI:
+    """Create and return the Groq OpenAI-compatible client."""
 
-    if not NVIDIA_API_KEY:
+    if not GROQ_API_KEY:
         raise RuntimeError(
-            "NVIDIA_API_KEY is not configured. "
+            "GROQ_API_KEY is not configured. "
             "Check your .env file."
         )
 
     return OpenAI(
-        base_url=NVIDIA_BASE_URL,
-        api_key=NVIDIA_API_KEY,
+        base_url=GROQ_BASE_URL,
+        api_key=GROQ_API_KEY,
         timeout=120.0,
         max_retries=1,
     )
@@ -63,13 +64,13 @@ def get_nvidia_client() -> OpenAI:
 # CONNECTION TEST
 # ============================================================
 
-def test_nvidia_connection() -> str:
-    """Test the NVIDIA LLM connection."""
+def test_groq_connection() -> str:
+    """Test the Groq LLM connection."""
 
-    client = get_nvidia_client()
+    client = get_groq_client()
 
     response = client.chat.completions.create(
-        model=NVIDIA_MODEL,
+        model=GROQ_MODEL,
         messages=[
             {
                 "role": "user",
@@ -120,6 +121,17 @@ def _clean_text(
     return str(value).strip()
 
 
+def _truncate_text(
+    value: Any,
+    max_chars: int = 240,
+    default: str = "",
+) -> str:
+    text = _clean_text(value, default)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
+
+
 def _as_list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else []
 
@@ -131,101 +143,35 @@ def _as_list(value: Any) -> List[Any]:
 def _prepare_restaurant(
     restaurant: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """
-    Prepare one restaurant for the LLM.
-
-    The current restaurant search provides distance from the
-    attraction being searched. Preserve that relationship.
-    """
+    """Prepare one restaurant concisely for the LLM."""
+    cuisine = restaurant.get("cuisine", restaurant.get("cuisines", []))
+    if isinstance(cuisine, list):
+        cuisine = cuisine[:3]
 
     return {
-        "name": _clean_text(
-            restaurant.get("name"),
-            "Restaurant",
-        ),
-        "category": _clean_text(
-            restaurant.get("category"),
-            "Restaurant",
-        ),
-        "distance_km": _safe_float(
-            restaurant.get("distance_km"),
-            0,
-        ),
-        "restaurant_quality_score": _safe_float(
-            restaurant.get(
-                "restaurant_quality_score"
-            ),
-            0,
-        ),
-        "cuisine": restaurant.get(
-            "cuisine",
-            restaurant.get(
-                "cuisines",
-                [],
-            ),
-        ),
-        "address": _clean_text(
-            restaurant.get("address")
-        ),
-        "latitude": restaurant.get("latitude"),
-        "longitude": restaurant.get("longitude"),
+        "name": _clean_text(restaurant.get("name"), "Restaurant"),
+        "category": _clean_text(restaurant.get("category"), "Restaurant"),
+        "distance_km": round(_safe_float(restaurant.get("distance_km"), 0), 2),
+        "quality_score": round(_safe_float(restaurant.get("restaurant_quality_score"), 0), 2),
+        "cuisine": cuisine,
     }
 
 
 def _prepare_restaurant_group(
     group: Dict[str, Any],
+    max_restaurants: int = 3,
 ) -> Dict[str, Any]:
-    """
-    Prepare restaurants grouped around a specific attraction.
+    """Prepare restaurants grouped around a specific attraction."""
+    restaurants = [
+        _prepare_restaurant(item)
+        for item in _as_list(group.get("restaurants", []))
+        if isinstance(item, dict)
+    ][:max_restaurants]
 
-    Expected current backend structure:
-
-    {
-        "place_name": "...",
-        "place_latitude": ...,
-        "place_longitude": ...,
-        "restaurant_count": 5,
-        "restaurants": [...]
+    return {
+        "place_name": _clean_text(group.get("place_name"), "Unknown attraction"),
+        "restaurants": restaurants,
     }
-    """
-
-    prepared = {
-        "place_name": _clean_text(
-            group.get("place_name"),
-            "Unknown attraction",
-        ),
-        "place_latitude": group.get(
-            "place_latitude",
-            group.get("latitude"),
-        ),
-        "place_longitude": group.get(
-            "place_longitude",
-            group.get("longitude"),
-        ),
-        "restaurant_count": _safe_int(
-            group.get("restaurant_count"),
-            len(
-                _as_list(
-                    group.get("restaurants")
-                )
-            ),
-        ),
-        "restaurants": [],
-    }
-
-    restaurants = group.get(
-        "restaurants",
-        [],
-    )
-
-    if isinstance(restaurants, list):
-        prepared["restaurants"] = [
-            _prepare_restaurant(item)
-            for item in restaurants
-            if isinstance(item, dict)
-        ]
-
-    return prepared
 
 
 # ============================================================
@@ -235,55 +181,18 @@ def _prepare_restaurant_group(
 def _prepare_place(
     place: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Prepare tourist-place information for the LLM."""
-
+    """Prepare tourist-place information concisely for the LLM."""
+    history_or_desc = _truncate_text(
+        place.get("wikipedia_description") or place.get("description"),
+        max_chars=240,
+    )
     return {
-        "name": _clean_text(
-            place.get("name"),
-            "Unnamed place",
-        ),
-        "category": _clean_text(
-            place.get("category"),
-            "Tourist Attraction",
-        ),
-        "tourist_place_type": _clean_text(
-            place.get("tourist_place_type")
-        ),
-        "distance_km": _safe_float(
-            place.get("distance_km"),
-            0,
-        ),
-        "tourist_quality_score": _safe_float(
-            place.get(
-                "tourist_quality_score"
-            ),
-            0,
-        ),
-        "preprocessing_score": _safe_float(
-            place.get(
-                "preprocessing_score"
-            ),
-            0,
-        ),
-        "description": _clean_text(
-            place.get("description")
-        ),
-        "why_visit": _clean_text(
-            place.get("why_visit")
-        ),
-        "wikipedia_title": _clean_text(
-            place.get("wikipedia_title")
-        ),
-        "wikipedia_description": _clean_text(
-            place.get(
-                "wikipedia_description"
-            )
-        ),
-        "wikipedia_url": _clean_text(
-            place.get("wikipedia_url")
-        ),
-        "latitude": place.get("latitude"),
-        "longitude": place.get("longitude"),
+        "name": _clean_text(place.get("name"), "Unnamed place"),
+        "category": _clean_text(place.get("category"), "Tourist Attraction"),
+        "distance_km": round(_safe_float(place.get("distance_km"), 0), 2),
+        "quality_score": round(_safe_float(place.get("tourist_quality_score"), 0), 2),
+        "why_visit": _truncate_text(place.get("why_visit"), max_chars=160),
+        "info": history_or_desc,
     }
 
 
@@ -297,101 +206,22 @@ def _prepare_weather(
     if not weather:
         return {}
 
-    daily = weather.get(
-        "daily",
-        {},
-    )
+    daily = weather.get("daily", {})
+    dates = _as_list(daily.get("time", []))
+    max_temps = _as_list(daily.get("temperature_2m_max", []))
+    min_temps = _as_list(daily.get("temperature_2m_min", []))
+    rain_probs = _as_list(daily.get("precipitation_probability_max", []))
 
-    result = {
-        "timezone": weather.get("timezone"),
-        "current": weather.get(
-            "current",
-            {},
-        ),
-        "daily": [],
-    }
-
-    dates = _as_list(
-        daily.get("time", [])
-    )
-
-    weather_codes = _as_list(
-        daily.get("weather_code", [])
-    )
-
-    max_temperatures = _as_list(
-        daily.get("temperature_2m_max", [])
-    )
-
-    min_temperatures = _as_list(
-        daily.get("temperature_2m_min", [])
-    )
-
-    rain_probabilities = _as_list(
-        daily.get(
-            "precipitation_probability_max",
-            [],
-        )
-    )
-
-    precipitation = _as_list(
-        daily.get(
-            "precipitation_sum",
-            [],
-        )
-    )
-
-    sunrise = _as_list(
-        daily.get("sunrise", [])
-    )
-
-    sunset = _as_list(
-        daily.get("sunset", [])
-    )
-
+    compact_daily = []
     for index, trip_date in enumerate(dates):
-        result["daily"].append(
-            {
-                "date": trip_date,
-                "weather_code": (
-                    weather_codes[index]
-                    if index < len(weather_codes)
-                    else None
-                ),
-                "temperature_max": (
-                    max_temperatures[index]
-                    if index < len(max_temperatures)
-                    else None
-                ),
-                "temperature_min": (
-                    min_temperatures[index]
-                    if index < len(min_temperatures)
-                    else None
-                ),
-                "rain_probability": (
-                    rain_probabilities[index]
-                    if index < len(rain_probabilities)
-                    else None
-                ),
-                "precipitation": (
-                    precipitation[index]
-                    if index < len(precipitation)
-                    else None
-                ),
-                "sunrise": (
-                    sunrise[index]
-                    if index < len(sunrise)
-                    else None
-                ),
-                "sunset": (
-                    sunset[index]
-                    if index < len(sunset)
-                    else None
-                ),
-            }
-        )
+        compact_daily.append({
+            "date": trip_date,
+            "max_c": max_temps[index] if index < len(max_temps) else None,
+            "min_c": min_temps[index] if index < len(min_temps) else None,
+            "rain_pct": rain_probs[index] if index < len(rain_probs) else None,
+        })
 
-    return result
+    return {"daily": compact_daily}
 
 
 # ============================================================
@@ -401,58 +231,21 @@ def _prepare_weather(
 def _prepare_route(
     route: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-
     if not route:
         return {}
 
-    prepared_places = []
-
-    for place in _as_list(
-        route.get("places", [])
-    ):
-        if not isinstance(place, dict):
-            continue
-
-        prepared_places.append(
-            {
-                "route_order": place.get(
-                    "route_order"
-                ),
-                "name": _clean_text(
-                    place.get("name")
-                ),
-                "category": _clean_text(
-                    place.get("category")
-                ),
-                "distance_from_previous_km":
-                    _safe_float(
-                        place.get(
-                            "distance_from_previous_km"
-                        ),
-                        0,
-                    ),
-                "cumulative_route_distance_km":
-                    _safe_float(
-                        place.get(
-                            "cumulative_route_distance_km"
-                        ),
-                        0,
-                    ),
-            }
-        )
+    places = []
+    for place in _as_list(route.get("places", []))[:8]:
+        if isinstance(place, dict):
+            places.append({
+                "order": place.get("route_order"),
+                "name": _clean_text(place.get("name")),
+                "km_from_prev": round(_safe_float(place.get("distance_from_previous_km"), 0), 2),
+            })
 
     return {
-        "total_places": route.get(
-            "total_places",
-            len(prepared_places),
-        ),
-        "total_distance_km": _safe_float(
-            route.get(
-                "total_distance_km"
-            ),
-            0,
-        ),
-        "places": prepared_places,
+        "total_distance_km": round(_safe_float(route.get("total_distance_km"), 0), 2),
+        "places": places,
     }
 
 
@@ -463,146 +256,50 @@ def _prepare_route(
 def _prepare_itinerary(
     itinerary: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-
     if not itinerary:
         return {}
 
-    prepared_days = []
-
-    for day in _as_list(
-        itinerary.get("days", [])
-    ):
+    days = []
+    for day in _as_list(itinerary.get("days", [])):
         if not isinstance(day, dict):
             continue
+        place_names = [
+            _clean_text(p.get("name"))
+            for p in _as_list(day.get("places", []))
+            if isinstance(p, dict) and _clean_text(p.get("name"))
+        ]
+        days.append({
+            "day": day.get("day"),
+            "date": day.get("date"),
+            "places": place_names,
+        })
 
-        prepared_places = []
-
-        for place in _as_list(
-            day.get("places", [])
-        ):
-            if not isinstance(place, dict):
-                continue
-
-            prepared_places.append(
-                {
-                    "order": place.get("order"),
-                    "name": _clean_text(
-                        place.get("name")
-                    ),
-                    "category": _clean_text(
-                        place.get("category")
-                    ),
-                    "distance_km": _safe_float(
-                        place.get("distance_km"),
-                        0,
-                    ),
-                    "why_visit": _clean_text(
-                        place.get("why_visit")
-                    ),
-                    "tourist_quality_score":
-                        _safe_float(
-                            place.get(
-                                "tourist_quality_score"
-                            ),
-                            0,
-                        ),
-                }
-            )
-
-        prepared_days.append(
-            {
-                "day": day.get("day"),
-                "date": day.get("date"),
-                "weather_suitability":
-                    day.get(
-                        "weather_suitability"
-                    ),
-                "recommendation":
-                    day.get(
-                        "recommendation"
-                    ),
-                "places": prepared_places,
-            }
-        )
-
-    return {
-        "total_days": itinerary.get(
-            "total_days",
-            len(prepared_days),
-        ),
-        "total_places": itinerary.get(
-            "total_places",
-            sum(
-                len(day["places"])
-                for day in prepared_days
-            ),
-        ),
-        "days": prepared_days,
-    }
+    return {"days": days}
 
 
 # ============================================================
-# RESTAURANT PREPARATION
+# RESTAURANTS COLLECTION PREPARATION
 # ============================================================
 
 def _prepare_restaurants(
     restaurants: Optional[Dict[str, Any]],
+    max_groups: int = 6,
 ) -> Dict[str, Any]:
-
     if not restaurants:
-        return {
-            "count": 0,
-            "places_checked": 0,
-            "restaurants_found": 0,
-            "items": [],
-        }
-
-    raw_items = _as_list(
-        restaurants.get("items", [])
-    )
+        return {"items": []}
 
     prepared_items = []
-
-    for item in raw_items:
+    for item in _as_list(restaurants.get("items", [])):
         if not isinstance(item, dict):
             continue
-
-        # Current grouped structure.
-        if isinstance(
-            item.get("restaurants"),
-            list,
-        ):
-            prepared_items.append(
-                _prepare_restaurant_group(item)
-            )
-
-        # Backward compatibility with old flat structure.
+        if isinstance(item.get("restaurants"), list):
+            group = _prepare_restaurant_group(item, max_restaurants=3)
+            if group["restaurants"]:
+                prepared_items.append(group)
         elif item.get("name"):
-            prepared_items.append(
-                _prepare_restaurant(item)
-            )
+            prepared_items.append(_prepare_restaurant(item))
 
-    return {
-        "count": restaurants.get(
-            "count",
-            len(prepared_items),
-        ),
-        "places_checked": restaurants.get(
-            "places_checked",
-            len(prepared_items),
-        ),
-        "restaurants_found": restaurants.get(
-            "restaurants_found",
-            sum(
-                item.get(
-                    "restaurant_count",
-                    1,
-                )
-                for item in prepared_items
-            ),
-        ),
-        "items": prepared_items,
-    }
+    return {"items": prepared_items[:max_groups]}
 
 
 def _calculate_trip_days(
@@ -644,6 +341,12 @@ def build_llm_context(
     preferences: Optional[str] = None,
 ) -> Dict[str, Any]:
 
+    compact_places = [
+        _prepare_place(place)
+        for place in places
+        if isinstance(place, dict)
+    ][:6]
+
     return {
         "trip": {
             "destination": destination,
@@ -652,20 +355,14 @@ def build_llm_context(
             "trip_days": _calculate_trip_days(start_date, end_date),
             "travelers": travelers,
             "budget": budget,
-            "preferences": preferences,
-            "user_query": user_query,
+            "preferences": _truncate_text(preferences, 200),
+            "user_query": _truncate_text(user_query, 300),
         },
-        "places": [
-            _prepare_place(place)
-            for place in places
-            if isinstance(place, dict)
-        ],
+        "places": compact_places,
         "route": _prepare_route(route),
         "weather": _prepare_weather(weather),
         "itinerary": _prepare_itinerary(itinerary),
-        "restaurants": _prepare_restaurants(
-            restaurants
-        ),
+        "restaurants": _prepare_restaurants(restaurants, max_groups=6),
     }
 
 
@@ -675,541 +372,41 @@ def build_llm_context(
 
 SYSTEM_PROMPT = """
 You are an expert AI travel planner and travel-budget analyst.
-
-Your job is to create a COMPLETE, detailed, readable, personalized travel plan.
-Do not summarize away important information. The user explicitly wants useful
-background, history, reasons to visit, what to see, nearby food, and realistic
-approximate budget estimates.
-
-The backend supplies:
-- destination
-- exact trip start and end dates
-- exact number of trip days
-- traveler count
-- user budget
-- user query and preferences
-- selected tourist places
-- descriptions and historical/background information
-- route information
-- weather information
-- restaurants grouped by the attraction they are near
-- a preliminary itinerary
-
-============================================================
-NON-NEGOTIABLE COMPLETENESS
-============================================================
-
-DO NOT remove important place information just to make the response shorter.
-
-Every attraction that you place in the itinerary MUST contain:
-1. place name
-2. category
-3. why_visit
-4. background/history
-5. what_to_see
-6. practical/travel note when useful
-7. estimated cost
-
-The user specifically wants to understand:
-- Why should I visit this place?
-- What is its history?
-- What is important about it?
-- What should I see there?
-- How much might it cost?
-
-For historically important places, give a meaningful short history, normally
-2-4 sentences, using backend information whenever supplied.
-
-If backend historical information is available, preserve it and use it.
-If backend data is incomplete, you may provide a clearly labeled planning
-description based on generally known information, but NEVER claim an
-unverified fact is verified backend data.
-
-NEVER replace useful text with:
-"..."
-"Details not available"
-or an empty field when the backend contains useful information.
-
-If a specific fact genuinely cannot be established, say:
-"Specific information is not available in the current data."
-Then still provide all other useful information that is supported.
-
-============================================================
-TRIP-DAY ACCURACY
-============================================================
-
-The trip has an exact start date, end date, and exact number of calendar days.
-
-Create EXACTLY one day object for each calendar date from start_date through
-end_date, inclusive.
-
-NEVER create an extra day.
-NEVER skip a date.
-NEVER invent dates.
-NEVER create "Day 4" for a 3-day trip.
-
-Each day must use its real calendar date.
-
-============================================================
-PLACE SELECTION
-============================================================
-
-Use the supplied tourist places and itinerary as the primary source for
-attraction selection.
-
-Respect the user's query and preferences.
-
-If the user prefers historical places, prioritize historical places.
-If the user wants less walking, avoid unnecessarily walking-heavy plans.
-If the user asks for a relaxed trip, do not overcrowd a day.
-
-Do not remove important attractions merely because a shorter answer is easier.
-
-============================================================
-RESTAURANT LOCATION RULE
-============================================================
-
-This is critical.
-
-Restaurants are grouped around INDIVIDUAL ATTRACTIONS.
-
-For every meal:
-1. Identify the attraction the traveler has JUST finished.
-2. Find the restaurant group whose "place_name" matches that attraction.
-3. Recommend restaurants ONLY from that group.
-4. State "Near <attraction>".
-5. Give one best choice and up to two alternatives when available.
-
-Example:
-
-Golconda Fort
-11:00 AM - 12:30 PM
-finish sightseeing
-
-Lunch
-12:30 PM - 01:30 PM
-Near Golconda Fort
-
-Use ONLY the Golconda Fort restaurant group.
-
-Do NOT use restaurants from the original map-selected Hyderabad location.
-
-The same rule applies to evening snacks and dinner.
-
-Prefer restaurant choices using:
-1. compatibility with user's food preferences
-2. shorter distance from the attraction
-3. higher quality score
-4. suitable category/cuisine if supplied
-
-Do not claim a restaurant is near an attraction unless it belongs to that
-attraction's restaurant group.
-
-If no restaurants are available in that attraction's group, say:
-"No suitable restaurant was identified near this attraction in the current
-travel data."
-
-============================================================
-DETAILED PLACE CONTENT
-============================================================
-
-For every important attraction, write:
-
-Why visit:
-A concise but meaningful explanation of why the traveler should spend time
-there and what makes it worth visiting.
-
-History:
-A short, readable historical background. Include known historical significance,
-period, ruler/dynasty/architectural context when supported by the supplied
-data or clearly established general knowledge.
-
-What to see:
-Give concrete things the traveler should look for at the attraction.
-
-Practical note:
-Mention walking difficulty, indoor/outdoor character, weather relevance,
-or other useful planning information only when appropriate.
-
-Do not repeat the same generic text for every place.
-
-============================================================
-APPROXIMATE BUDGET
-============================================================
-
-The user explicitly wants approximate costs.
-
-ALWAYS provide a planning estimate for:
-- attraction entry/tickets
-- lunch
-- evening snack
-- dinner when included
-- local transportation
-- each day's total
-- complete trip total
-- comparison with user's budget
-
-There is an important distinction:
-
-1. VERIFIED COST
-If the backend actually supplies an exact ticket/price, use it and label it
-as verified/backend-provided.
-
-2. APPROXIMATE COST
-If the backend does not supply an exact price, provide a reasonable
-PLANNING ESTIMATE or RANGE and clearly label it:
-"Approximate"
-or
-"Planning estimate - not verified"
-
-Do NOT invent an exact official ticket price.
-
-For example, if the ticket price is not in the backend:
-"Approximate entry: ₹20-₹50/person"
-is acceptable.
-
-"Entry fee: ₹25/person"
-is NOT acceptable unless ₹25 came from the backend.
-
-For food, estimate a realistic range based on the restaurant category,
-location, traveler count and user's budget/preferences. Do not use the
-restaurant quality score as a food price.
-
-For transportation, estimate a reasonable local transportation range using
-the route/trip context. Clearly label it approximate.
-
-For accommodation:
-- If the user provided accommodation cost, include it.
-- If no accommodation information is provided, set accommodation to
-  "Not included" and explain that lodging was not provided.
-Do not invent a hotel booking.
-
-Use traveler count when calculating totals.
-
-If travelers = 2 and a meal estimate is ₹500-₹700, represent the cost as
-₹500-₹700 FOR 2 PEOPLE.
-
-============================================================
-BUDGET MATH
-============================================================
-
-All numeric budget fields must be mathematically consistent.
-
-For each day:
-
-total_min =
-attractions_min + food_min + transport_min + accommodation_min + other_min
-
-total_max =
-attractions_max + food_max + transport_max + accommodation_max + other_max
-
-For the complete trip:
-
-estimated_total.min =
-sum of all day total_min
-
-estimated_total.max =
-sum of all day total_max
-
-If a numeric user budget exists:
-
-remaining_budget.min =
-budget - estimated_total.max
-
-remaining_budget.max =
-budget - estimated_total.min
-
-Budget status:
-- "Within Budget" only when estimated maximum is <= budget.
-- "May Exceed Budget" when the range crosses the budget.
-- "Over Budget" when even the minimum estimate is above the budget.
-
-Never call a trip "Within Budget" if its maximum estimated cost exceeds the
-user's budget.
-
-If accommodation is excluded, say so clearly in the budget summary so the user
-does not mistake the estimate for a complete hotel-inclusive trip.
-
-============================================================
-WEATHER
-============================================================
-
-Use supplied weather to adjust the itinerary.
-
-Do not produce a long weather report.
-
-Mention weather only when it changes the plan, for example:
-- move an outdoor fort before rain
-- put a museum during a rain period
-- suggest umbrella/rain protection
-
-Never invent hourly weather.
-
-============================================================
-USER QUERY
-============================================================
-
-The user's query is a major planning constraint.
-
-Respect:
-- budget
-- traveler count
-- family/solo/couple/friends
-- preferred places
-- unwanted places
-- food preferences
-- restaurant preferences
-- walking preferences
-- transportation preferences
-- relaxed/busy preference
-- desired historical detail
-- special requests
-
-The query must affect actual itinerary choices.
-
-============================================================
-OUTPUT STRUCTURE
-============================================================
-
-Return ONLY valid JSON.
-No Markdown.
-No code fences.
-No commentary.
-
-Use exactly this structure:
-
+Create a complete, personalized travel plan in valid JSON only (no Markdown, no code fences, no commentary).
+
+Rules:
+1. Dates & Days: Create EXACTLY one day object per calendar date from start_date through end_date inclusive. Never add extra days or invent dates.
+2. Attractions: Use supplied places/itinerary and respect user preferences/query. Every activity must include place, category, why_visit (2-3 sentences), background (2-4 sentences of history/context), what_to_see, travel_note, and cost object. Never use "..." as placeholder text.
+3. Restaurants: For lunch, evening_snack, and dinner, pick ONLY from the restaurant group matching the attraction just completed ("near": "<attraction>"). Give 1 best choice + up to 2 alternatives. If none exist in that group, set recommendations to [] and explain in fallback_message.
+4. Budget: Provide approximate planning estimates labeled "Approximate" (never claim unverified prices are official/verified). Include costs for all travelers. Accommodation is excluded/not included unless supplied. Keep daily and trip totals mathematically consistent. Budget status is "Within Budget" (max <= budget), "May Exceed Budget" (min <= budget < max), or "Over Budget" (min > budget).
+5. Weather: Mention weather only when it shifts outdoor/indoor timing or packing.
+
+JSON Schema:
 {
   "title": "AI Travel Plan",
-  "trip_overview": "2-4 sentence useful overview",
-  "trip_summary": {
-    "destination": "...",
-    "start_date": "...",
-    "end_date": "...",
-    "travelers": 2,
-    "budget": "...",
-    "preferences": "..."
-  },
-  "highlights": [
-    {
-      "title": "...",
-      "description": "..."
-    }
-  ],
+  "trip_overview": "2-4 sentence overview",
+  "trip_summary": {"destination":"","start_date":"","end_date":"","travelers":2,"budget":"","preferences":""},
+  "highlights": [{"title":"","description":""}],
   "days": [
     {
       "day": 1,
-      "date": "...",
-      "weather_note": "...",
-
-      "morning": {
-        "start_time": "...",
-        "end_time": "...",
-        "activities": [
-          {
-            "place": "...",
-            "category": "...",
-            "why_visit": "Meaningful explanation.",
-            "background": "Useful history/background.",
-            "what_to_see": "Specific things to see.",
-            "travel_note": "Practical note.",
-            "cost": {
-              "type": "entry",
-              "amount_per_person": 0,
-              "total_for_travelers": 0,
-              "min_total": 0,
-              "max_total": 0,
-              "currency": "INR",
-              "label": "Approximate",
-              "note": "Explain whether verified or approximate."
-            }
-          }
-        ]
-      },
-
-      "lunch": {
-        "start_time": "...",
-        "end_time": "...",
-        "near": "The attraction just completed",
-        "recommendations": [
-          {
-            "rank": 1,
-            "name": "...",
-            "distance_km": 0,
-            "category": "...",
-            "quality_score": 0,
-            "reason": "Why this restaurant fits.",
-            "cost": {
-              "min_total": 0,
-              "max_total": 0,
-              "currency": "INR",
-              "label": "Approximate",
-              "note": "Planning estimate for all travelers."
-            }
-          }
-        ],
-        "fallback_message": ""
-      },
-
-      "afternoon": {
-        "start_time": "...",
-        "end_time": "...",
-        "activities": [
-          {
-            "place": "...",
-            "category": "...",
-            "why_visit": "...",
-            "background": "...",
-            "what_to_see": "...",
-            "travel_note": "...",
-            "cost": {
-              "type": "entry",
-              "amount_per_person": 0,
-              "total_for_travelers": 0,
-              "min_total": 0,
-              "max_total": 0,
-              "currency": "INR",
-              "label": "Approximate",
-              "note": "..."
-            }
-          }
-        ]
-      },
-
-      "evening": {
-        "start_time": "...",
-        "end_time": "...",
-        "activity": "...",
-        "near": "..."
-      },
-
-      "evening_snack": {
-        "start_time": "...",
-        "end_time": "...",
-        "near": "The attraction just completed",
-        "recommendations": [
-          {
-            "rank": 1,
-            "name": "...",
-            "distance_km": 0,
-            "category": "...",
-            "quality_score": 0,
-            "reason": "...",
-            "cost": {
-              "min_total": 0,
-              "max_total": 0,
-              "currency": "INR",
-              "label": "Approximate",
-              "note": "..."
-            }
-          }
-        ],
-        "fallback_message": ""
-      },
-
-      "dinner": {
-        "start_time": "...",
-        "end_time": "...",
-        "near": "...",
-        "recommendations": [],
-        "fallback_message": ""
-      },
-
-      "day_cost": {
-        "attractions_min": 0,
-        "attractions_max": 0,
-        "food_min": 0,
-        "food_max": 0,
-        "transport_min": 0,
-        "transport_max": 0,
-        "accommodation_min": 0,
-        "accommodation_max": 0,
-        "other_min": 0,
-        "other_max": 0,
-        "total_min": 0,
-        "total_max": 0,
-        "currency": "INR",
-        "notes": "Explain important inclusions/exclusions."
-      },
-
-      "day_tip": "One useful practical tip."
+      "date": "YYYY-MM-DD",
+      "weather_note": "",
+      "morning": {"start_time":"09:00","end_time":"11:30","activities":[{"place":"","category":"","why_visit":"","background":"","what_to_see":"","travel_note":"","cost":{"type":"entry","amount_per_person":0,"total_for_travelers":0,"min_total":0,"max_total":0,"currency":"INR","label":"Approximate","note":""}}]},
+      "lunch": {"start_time":"12:00","end_time":"13:00","near":"","recommendations":[{"rank":1,"name":"","distance_km":0,"category":"","quality_score":0,"reason":"","cost":{"min_total":0,"max_total":0,"currency":"INR","label":"Approximate","note":""}}],"fallback_message":""},
+      "afternoon": {"start_time":"14:00","end_time":"16:00","activities":[]},
+      "evening": {"start_time":"17:30","end_time":"19:00","activity":"","near":""},
+      "evening_snack": {"start_time":"16:15","end_time":"17:00","near":"","recommendations":[],"fallback_message":""},
+      "dinner": {"start_time":"19:30","end_time":"21:00","near":"","recommendations":[],"fallback_message":""},
+      "day_cost": {"attractions_min":0,"attractions_max":0,"food_min":0,"food_max":0,"transport_min":0,"transport_max":0,"accommodation_min":0,"accommodation_max":0,"other_min":0,"other_max":0,"total_min":0,"total_max":0,"currency":"INR","notes":""},
+      "day_tip": ""
     }
   ],
-
-  "trip_budget": {
-    "travelers": 2,
-    "budget_amount": 10000,
-    "currency": "INR",
-
-    "attractions": {
-      "min": 0,
-      "max": 0
-    },
-    "food": {
-      "min": 0,
-      "max": 0
-    },
-    "transportation": {
-      "min": 0,
-      "max": 0
-    },
-    "accommodation": {
-      "min": 0,
-      "max": 0
-    },
-    "other": {
-      "min": 0,
-      "max": 0
-    },
-    "estimated_total": {
-      "min": 0,
-      "max": 0
-    },
-    "remaining_budget": {
-      "min": 0,
-      "max": 0
-    },
-    "budget_status": "Within Budget",
-    "summary": "Clear explanation of estimated total and budget."
-  },
-
-  "important_places": [
-    {
-      "name": "...",
-      "background": "...",
-      "why_visit": "...",
-      "what_to_see": "..."
-    }
-  ],
-
-  "travel_tips": [
-    "..."
-  ]
+  "trip_budget": {"travelers":2,"budget_amount":10000,"currency":"INR","attractions":{"min":0,"max":0},"food":{"min":0,"max":0},"transportation":{"min":0,"max":0},"accommodation":{"min":0,"max":0},"other":{"min":0,"max":0},"estimated_total":{"min":0,"max":0},"remaining_budget":{"min":0,"max":0},"budget_status":"Within Budget","summary":""},
+  "important_places": [{"name":"","background":"","why_visit":"","what_to_see":""}],
+  "travel_tips": [""]
 }
-
-============================================================
-FINAL QUALITY CHECK BEFORE RETURNING JSON
-============================================================
-
-Before returning the JSON, verify all of these:
-
-1. Number of days exactly matches the calendar date range.
-2. No extra day exists.
-3. Every selected attraction has why_visit.
-4. Every selected attraction has meaningful background/history.
-5. Every selected attraction has what_to_see.
-6. Every selected attraction has a cost estimate.
-7. Lunch is near the attraction just completed.
-8. Evening snack is near the attraction just completed.
-9. Restaurant names come from the matching attraction group.
-10. Food costs are approximate and do not use quality score as price.
-11. Daily totals are mathematically correct.
-12. Complete-trip totals are mathematically correct.
-13. Budget status matches the maximum/minimum estimates.
-14. User preferences actually affect choices.
-15. No useful backend information has been removed.
-16. Do not use "..." as a substitute for missing detail.
-17. Return JSON only.
-"""
+""".strip()
 
 
 # ============================================================
@@ -1219,85 +416,21 @@ Before returning the JSON, verify all of these:
 def _build_user_prompt(
     context: Dict[str, Any],
 ) -> str:
-    """Convert backend context into a strict, completeness-focused prompt."""
-
+    """Convert compact backend context into a focused prompt."""
     trip = context.get("trip", {})
-    places = context.get("places", [])
-    itinerary = context.get("itinerary", {})
-    restaurants = context.get("restaurants", {})
+    compact_json = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
 
-    return f"""
-Create the final COMPLETE personalized AI travel plan.
+    return (
+        f"Generate the complete JSON travel plan from {trip.get('start_date')} to "
+        f"{trip.get('end_date')} ({trip.get('trip_days')} days). "
+        f"Honor user query/preferences strictly, use only matching attraction restaurant groups, "
+        f"include approximate INR costs for all travelers, and return valid JSON only.\n"
+        f"DATA:{compact_json}"
+    )
 
-Do not shorten the response by removing history, reasons to visit, what to see,
-or cost information. The user wants detailed but readable explanations.
-
-MANDATORY:
-- Use exactly the calendar dates from {trip.get("start_date")} through
-  {trip.get("end_date")}.
-- Create exactly {trip.get("trip_days")} day objects.
-- Do not create any additional day.
-- Use the user's query as a real constraint.
-- Keep the itinerary chronological.
-- Every attraction must contain why_visit, background, what_to_see, travel_note,
-  and a cost object.
-- Preserve useful historical/background information from backend data.
-- Give a meaningful history for important historical attractions.
-- Give a practical reason for visiting every selected attraction.
-- Do not output "..." anywhere.
-- Do not replace useful content with generic filler.
-- The itinerary attractions must come from the supplied backend tourist places/itinerary.
-- Prioritize strong historical/heritage places that satisfy the user preferences.
-- If Golconda Fort is present in supplied tourist-place data, strongly prefer it over weak generic attractions.
-- Highlights must only contain attractions that actually appear in the day-by-day itinerary.
-- Never call the travelers a couple unless the user explicitly says they are a couple.
-- Use practical meal times: lunch 12:00-14:00, evening snack 16:30-18:00, dinner 19:00-21:00.
-
-RESTAURANT RULE:
-- Restaurants are grouped by attraction.
-- Lunch must use the restaurant group of the attraction just completed.
-- Evening snack must use the restaurant group of the attraction just completed.
-- Dinner must also use the group of the relevant nearby attraction when
-  restaurants are available.
-- Never use a generic city/original-map restaurant list when an attraction
-  group is available.
-- Recommend one best choice and up to two alternatives.
-- State the attraction in the "near" field.
-- Never claim a restaurant is near an attraction unless it is in that
-  attraction's restaurant group.
-
-BUDGET RULE:
-- The user explicitly wants approximate budget information.
-- Every attraction must have an entry-cost planning estimate.
-- If an exact backend price exists, use it.
-- Otherwise provide a reasonable APPROXIMATE RANGE and label it
-  "Approximate" or "Planning estimate - not verified".
-- Never invent an exact official ticket price.
-- Every meal/snack/dinner should have an approximate cost range for all
-  travelers.
-- Estimate local transport from the route/trip context.
-- Calculate every day total.
-- Calculate the complete trip total.
-- Compare the total with the user's budget.
-- Do not mark the trip "Within Budget" if the maximum estimate exceeds the
-  budget.
-- Accommodation must be excluded/not included when no accommodation data was
-  supplied.
-
-COMPLETENESS RULE:
-Do not omit an attraction simply because the answer becomes longer.
-Do not summarize history into one vague sentence when backend information is
-available.
-
-BACKEND DATA:
-{json.dumps(context, ensure_ascii=False, indent=2)}
-
-Return valid JSON only.
-"""
 
 # ============================================================
 # JSON EXTRACTION
-
 # ============================================================
 
 def _extract_json(
@@ -1402,12 +535,7 @@ def _validate_cost(
     cost: Any,
 ) -> Dict[str, Any]:
     """Normalize numeric, string, and nested cost shapes."""
-    import re
-
-    original = cost
     if isinstance(cost, dict):
-        # Older LLM responses sometimes nested the actual price under ticket,
-        # entry_cost, approximate_cost, or price.
         nested = (
             cost.get("ticket")
             or cost.get("entry_cost")
@@ -1502,83 +630,28 @@ def _validate_restaurant_recommendations(
             }
             continue
 
-        recommendation.setdefault(
-            "rank",
-            index + 1,
-        )
+        recommendation.setdefault("rank", index + 1)
+        recommendation.setdefault("name", "Restaurant")
+        recommendation.setdefault("distance_km", 0)
+        recommendation.setdefault("category", "Restaurant")
+        recommendation.setdefault("quality_score", 0)
+        recommendation.setdefault("reason", "")
+        recommendation["cost"] = _validate_cost(recommendation.get("cost"))
 
-        recommendation.setdefault(
-            "name",
-            "Restaurant",
-        )
-
-        recommendation.setdefault(
-            "distance_km",
-            0,
-        )
-
-        recommendation.setdefault(
-            "category",
-            "Restaurant",
-        )
-
-        recommendation.setdefault(
-            "quality_score",
-            0,
-        )
-
-        recommendation.setdefault(
-            "reason",
-            "",
-        )
-
-        recommendation["cost"] = _validate_cost(
-            recommendation.get("cost")
-        )
-
-    section.setdefault(
-        "fallback_message",
-        "",
-    )
+    section.setdefault("fallback_message", "")
 
 
 def _validate_activity(
     activity: Dict[str, Any],
 ) -> None:
 
-    activity.setdefault(
-        "place",
-        "Unnamed place",
-    )
-
-    activity.setdefault(
-        "category",
-        "Tourist Attraction",
-    )
-
-    activity.setdefault(
-        "why_visit",
-        "",
-    )
-
-    activity.setdefault(
-        "background",
-        "",
-    )
-
-    activity.setdefault(
-        "what_to_see",
-        "",
-    )
-
-    activity.setdefault(
-        "travel_note",
-        "",
-    )
-
-    activity["cost"] = _validate_cost(
-        activity.get("cost")
-    )
+    activity.setdefault("place", "Unnamed place")
+    activity.setdefault("category", "Tourist Attraction")
+    activity.setdefault("why_visit", "")
+    activity.setdefault("background", "")
+    activity.setdefault("what_to_see", "")
+    activity.setdefault("travel_note", "")
+    activity["cost"] = _validate_cost(activity.get("cost"))
 
 
 # ============================================================
@@ -1588,114 +661,35 @@ def _validate_activity(
 def _validate_travel_plan(
     plan: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """
-    Ensure the structured travel plan always contains the
-    fields required by the frontend.
-    """
+    """Ensure the structured travel plan contains required fields."""
 
-    if not isinstance(
-        plan,
-        dict,
-    ):
-        raise ValueError(
-            "Travel plan must be a dictionary."
-        )
+    if not isinstance(plan, dict):
+        raise ValueError("Travel plan must be a dictionary.")
 
-    plan.setdefault(
-        "title",
-        "AI Travel Plan",
-    )
+    plan.setdefault("title", "AI Travel Plan")
+    plan.setdefault("trip_overview", "")
+    plan.setdefault("trip_summary", {})
+    plan.setdefault("highlights", [])
+    plan.setdefault("days", [])
+    plan.setdefault("trip_budget", {})
+    plan.setdefault("important_places", [])
+    plan.setdefault("travel_tips", [])
 
-    plan.setdefault(
-        "trip_overview",
-        "",
-    )
-
-    plan.setdefault(
-        "trip_summary",
-        {},
-    )
-
-    plan.setdefault(
-        "highlights",
-        [],
-    )
-
-    plan.setdefault(
-        "days",
-        [],
-    )
-
-    plan.setdefault(
-        "trip_budget",
-        {},
-    )
-
-    plan.setdefault(
-        "important_places",
-        [],
-    )
-
-    plan.setdefault(
-        "travel_tips",
-        [],
-    )
-
-    if not isinstance(
-        plan["trip_summary"],
-        dict,
-    ):
+    if not isinstance(plan["trip_summary"], dict):
         plan["trip_summary"] = {}
-
-    if not isinstance(
-        plan["highlights"],
-        list,
-    ):
+    if not isinstance(plan["highlights"], list):
         plan["highlights"] = []
-
-    if not isinstance(
-        plan["days"],
-        list,
-    ):
+    if not isinstance(plan["days"], list):
         plan["days"] = []
-
-    if not isinstance(
-        plan["important_places"],
-        list,
-    ):
+    if not isinstance(plan["important_places"], list):
         plan["important_places"] = []
-
-    if not isinstance(
-        plan["travel_tips"],
-        list,
-    ):
+    if not isinstance(plan["travel_tips"], list):
         plan["travel_tips"] = []
 
-    # --------------------------------------------------------
-    # Trip budget
-    # --------------------------------------------------------
-
-    trip_budget = _ensure_dict(
-        plan,
-        "trip_budget",
-    )
-
-    trip_budget.setdefault(
-        "travelers",
-        plan["trip_summary"].get(
-            "travelers"
-        ),
-    )
-
-    trip_budget.setdefault(
-        "budget_amount",
-        0,
-    )
-
-    trip_budget.setdefault(
-        "currency",
-        "INR",
-    )
+    trip_budget = _ensure_dict(plan, "trip_budget")
+    trip_budget.setdefault("travelers", plan["trip_summary"].get("travelers"))
+    trip_budget.setdefault("budget_amount", 0)
+    trip_budget.setdefault("currency", "INR")
 
     for category in (
         "attractions",
@@ -1706,340 +700,93 @@ def _validate_travel_plan(
         "estimated_total",
         "remaining_budget",
     ):
-        category_data = _ensure_dict(
-            trip_budget,
-            category,
-        )
+        category_data = _ensure_dict(trip_budget, category)
+        category_data.setdefault("min", 0)
+        category_data.setdefault("max", 0)
 
-        category_data.setdefault(
-            "min",
-            0,
-        )
+    trip_budget.setdefault("budget_status", "Unknown")
+    trip_budget.setdefault("summary", "")
 
-        category_data.setdefault(
-            "max",
-            0,
-        )
-
-    trip_budget.setdefault(
-        "budget_status",
-        "Unknown",
-    )
-
-    trip_budget.setdefault(
-        "summary",
-        "",
-    )
-
-    # --------------------------------------------------------
-    # Days
-    # --------------------------------------------------------
-
-    for day_index, day in enumerate(
-        plan["days"]
-    ):
-
-        if not isinstance(
-            day,
-            dict,
-        ):
+    for day_index, day in enumerate(plan["days"]):
+        if not isinstance(day, dict):
             plan["days"][day_index] = {
                 "day": day_index + 1,
                 "date": "",
                 "weather_note": "",
-                "morning": {
-                    "start_time": "",
-                    "end_time": "",
-                    "activities": [],
-                },
-                "lunch": {
-                    "start_time": "",
-                    "end_time": "",
-                    "near": "",
-                    "recommendations": [],
-                    "fallback_message": "",
-                },
-                "afternoon": {
-                    "start_time": "",
-                    "end_time": "",
-                    "activities": [],
-                },
-                "evening": {
-                    "start_time": "",
-                    "end_time": "",
-                    "activity": "",
-                    "near": "",
-                },
-                "evening_snack": {
-                    "start_time": "",
-                    "end_time": "",
-                    "near": "",
-                    "recommendations": [],
-                    "fallback_message": "",
-                },
-                "dinner": {
-                    "start_time": "",
-                    "end_time": "",
-                    "near": "",
-                    "recommendations": [],
-                    "fallback_message": "",
-                },
+                "morning": {"start_time": "", "end_time": "", "activities": []},
+                "lunch": {"start_time": "", "end_time": "", "near": "", "recommendations": [], "fallback_message": ""},
+                "afternoon": {"start_time": "", "end_time": "", "activities": []},
+                "evening": {"start_time": "", "end_time": "", "activity": "", "near": ""},
+                "evening_snack": {"start_time": "", "end_time": "", "near": "", "recommendations": [], "fallback_message": ""},
+                "dinner": {"start_time": "", "end_time": "", "near": "", "recommendations": [], "fallback_message": ""},
                 "day_cost": {
-                    "attractions_min": 0,
-                    "attractions_max": 0,
-                    "food_min": 0,
-                    "food_max": 0,
-                    "transport_min": 0,
-                    "transport_max": 0,
-                    "accommodation_min": 0,
-                    "accommodation_max": 0,
-                    "other_min": 0,
-                    "other_max": 0,
-                    "total_min": 0,
-                    "total_max": 0,
-                    "currency": "INR",
-                    "notes": "",
+                    "attractions_min": 0, "attractions_max": 0,
+                    "food_min": 0, "food_max": 0,
+                    "transport_min": 0, "transport_max": 0,
+                    "accommodation_min": 0, "accommodation_max": 0,
+                    "other_min": 0, "other_max": 0,
+                    "total_min": 0, "total_max": 0,
+                    "currency": "INR", "notes": "",
                 },
                 "day_tip": "",
             }
             continue
 
-        day.setdefault(
-            "day",
-            day_index + 1,
-        )
+        day.setdefault("day", day_index + 1)
+        day.setdefault("date", "")
+        day.setdefault("weather_note", "")
 
-        day.setdefault(
-            "date",
-            "",
-        )
+        morning = _ensure_dict(day, "morning")
+        morning.setdefault("start_time", "")
+        morning.setdefault("end_time", "")
+        for activity in _ensure_list(morning, "activities"):
+            if isinstance(activity, dict):
+                _validate_activity(activity)
 
-        day.setdefault(
-            "weather_note",
-            "",
-        )
+        lunch = _ensure_dict(day, "lunch")
+        lunch.setdefault("start_time", "")
+        lunch.setdefault("end_time", "")
+        lunch.setdefault("near", "")
+        _validate_restaurant_recommendations(lunch)
 
-        # ----------------------------------------------------
-        # Morning
-        # ----------------------------------------------------
+        afternoon = _ensure_dict(day, "afternoon")
+        afternoon.setdefault("start_time", "")
+        afternoon.setdefault("end_time", "")
+        for activity in _ensure_list(afternoon, "activities"):
+            if isinstance(activity, dict):
+                _validate_activity(activity)
 
-        morning = _ensure_dict(
-            day,
-            "morning",
-        )
+        evening = _ensure_dict(day, "evening")
+        evening.setdefault("start_time", "")
+        evening.setdefault("end_time", "")
+        evening.setdefault("activity", "")
+        evening.setdefault("near", "")
 
-        morning.setdefault(
-            "start_time",
-            "",
-        )
+        evening_snack = _ensure_dict(day, "evening_snack")
+        evening_snack.setdefault("start_time", "")
+        evening_snack.setdefault("end_time", "")
+        evening_snack.setdefault("near", "")
+        _validate_restaurant_recommendations(evening_snack)
 
-        morning.setdefault(
-            "end_time",
-            "",
-        )
+        dinner = _ensure_dict(day, "dinner")
+        dinner.setdefault("start_time", "")
+        dinner.setdefault("end_time", "")
+        dinner.setdefault("near", "")
+        _validate_restaurant_recommendations(dinner)
 
-        morning_activities = _ensure_list(
-            morning,
-            "activities",
-        )
-
-        for activity in morning_activities:
-            if isinstance(
-                activity,
-                dict,
-            ):
-                _validate_activity(
-                    activity
-                )
-
-        # ----------------------------------------------------
-        # Lunch
-        # ----------------------------------------------------
-
-        lunch = _ensure_dict(
-            day,
-            "lunch",
-        )
-
-        lunch.setdefault(
-            "start_time",
-            "",
-        )
-
-        lunch.setdefault(
-            "end_time",
-            "",
-        )
-
-        lunch.setdefault(
-            "near",
-            "",
-        )
-
-        _validate_restaurant_recommendations(
-            lunch
-        )
-
-        # ----------------------------------------------------
-        # Afternoon
-        # ----------------------------------------------------
-
-        afternoon = _ensure_dict(
-            day,
-            "afternoon",
-        )
-
-        afternoon.setdefault(
-            "start_time",
-            "",
-        )
-
-        afternoon.setdefault(
-            "end_time",
-            "",
-        )
-
-        afternoon_activities = _ensure_list(
-            afternoon,
-            "activities",
-        )
-
-        for activity in afternoon_activities:
-            if isinstance(
-                activity,
-                dict,
-            ):
-                _validate_activity(
-                    activity
-                )
-
-        # ----------------------------------------------------
-        # Evening
-        # ----------------------------------------------------
-
-        evening = _ensure_dict(
-            day,
-            "evening",
-        )
-
-        evening.setdefault(
-            "start_time",
-            "",
-        )
-
-        evening.setdefault(
-            "end_time",
-            "",
-        )
-
-        evening.setdefault(
-            "activity",
-            "",
-        )
-
-        evening.setdefault(
-            "near",
-            "",
-        )
-
-        # ----------------------------------------------------
-        # Evening snack
-        # ----------------------------------------------------
-
-        evening_snack = _ensure_dict(
-            day,
-            "evening_snack",
-        )
-
-        evening_snack.setdefault(
-            "start_time",
-            "",
-        )
-
-        evening_snack.setdefault(
-            "end_time",
-            "",
-        )
-
-        evening_snack.setdefault(
-            "near",
-            "",
-        )
-
-        _validate_restaurant_recommendations(
-            evening_snack
-        )
-
-        # ----------------------------------------------------
-        # Dinner
-        # ----------------------------------------------------
-
-        dinner = _ensure_dict(
-            day,
-            "dinner",
-        )
-
-        dinner.setdefault(
-            "start_time",
-            "",
-        )
-
-        dinner.setdefault(
-            "end_time",
-            "",
-        )
-
-        dinner.setdefault(
-            "near",
-            "",
-        )
-
-        _validate_restaurant_recommendations(
-            dinner
-        )
-
-        # ----------------------------------------------------
-        # Day cost
-        # ----------------------------------------------------
-
-        day_cost = _ensure_dict(
-            day,
-            "day_cost",
-        )
-
+        day_cost = _ensure_dict(day, "day_cost")
         for key in (
-            "attractions_min",
-            "attractions_max",
-            "food_min",
-            "food_max",
-            "transport_min",
-            "transport_max",
-            "accommodation_min",
-            "accommodation_max",
-            "other_min",
-            "other_max",
-            "total_min",
-            "total_max",
+            "attractions_min", "attractions_max",
+            "food_min", "food_max",
+            "transport_min", "transport_max",
+            "accommodation_min", "accommodation_max",
+            "other_min", "other_max",
+            "total_min", "total_max",
         ):
-            day_cost.setdefault(
-                key,
-                0,
-            )
-
-        day_cost.setdefault(
-            "currency",
-            "INR",
-        )
-
-        day_cost.setdefault(
-            "notes",
-            "",
-        )
-
-        day.setdefault(
-            "day_tip",
-            "",
-        )
+            day_cost.setdefault(key, 0)
+        day_cost.setdefault("currency", "INR")
+        day_cost.setdefault("notes", "")
+        day.setdefault("day_tip", "")
 
     return plan
 
@@ -2053,7 +800,6 @@ def _parse_budget_amount(value: Any) -> Optional[float]:
         return None
     if isinstance(value, (int, float)):
         return float(value)
-    import re
     text = str(value).replace(",", "").replace("₹", "").replace("INR", "")
     match = re.search(r"\d+(?:\.\d+)?", text)
     return float(match.group()) if match else None
@@ -2121,7 +867,6 @@ def _repair_activity_content(
         if not _clean_text(activity.get("what_to_see")):
             activity["what_to_see"] = _clean_text(source.get("description"))
 
-    # Never allow placeholder text to reach the frontend.
     if not _clean_text(activity.get("why_visit")) or _clean_text(activity.get("why_visit")) == "...":
         activity["why_visit"] = (
             "Visit this place for its historical, architectural, cultural, "
@@ -2138,17 +883,10 @@ def _repair_activity_content(
     if not _clean_text(activity.get("travel_note")) or _clean_text(activity.get("travel_note")) == "...":
         activity["travel_note"] = "Plan at a comfortable pace and take breaks as needed."
 
-    # LLM must not claim an unverified price is verified.
     cost = _validate_cost(activity.get("cost"))
     label = _clean_text(cost.get("label"), "Approximate").casefold()
     note = _clean_text(cost.get("note"))
-    if "verified" in label or "confirmed" in note.casefold():
-        # This project does not currently pass a verified ticket-price field
-        # from the place search into the LLM context. Therefore keep all
-        # generated ticket prices explicitly as planning estimates.
-        cost["label"] = "Approximate"
-        cost["note"] = "Planning estimate - not verified by the current backend data."
-    elif not note:
+    if "verified" in label or "confirmed" in note.casefold() or not note:
         cost["label"] = "Approximate"
         cost["note"] = "Planning estimate - not verified by the current backend data."
     activity["cost"] = cost
@@ -2178,7 +916,6 @@ def _matching_restaurant_group(
 
 def _copy_restaurant_cost(rec: Dict[str, Any]) -> Dict[str, Any]:
     cost = _validate_cost(rec.get("cost"))
-    # Restaurant search does not provide prices, so these are always planning estimates.
     cost["label"] = "Approximate"
     if not _clean_text(cost.get("note")):
         cost["note"] = "Planning estimate for all travelers."
@@ -2202,7 +939,6 @@ def _repair_restaurant_section(
             repaired = []
             used = set()
 
-            # Preserve the LLM's preference when its restaurant is actually in the group.
             for candidate in existing:
                 name = _clean_text(candidate.get("name")).casefold()
                 if name in by_name and name not in used:
@@ -2216,7 +952,6 @@ def _repair_restaurant_section(
                     repaired.append(merged)
                     used.add(name)
 
-            # Fill remaining slots from backend ranking.
             for src in available:
                 name = _clean_text(src.get("name")).casefold()
                 if name in used:
@@ -2239,7 +974,6 @@ def _repair_restaurant_section(
             section["fallback_message"] = ""
             return
 
-    # No matching restaurants. Never invent one.
     section["recommendations"] = []
     section["fallback_message"] = (
         f"No suitable restaurant was identified near {near or 'this attraction'} "
@@ -2270,13 +1004,19 @@ def _build_activity_from_source(
     return {
         "place": _clean_text(source.get("name"), "Tourist Attraction"),
         "category": _clean_text(source.get("category"), "Historical / Tourist Attraction"),
-        "why_visit": _clean_text(source.get("why_visit") or source.get("description"),
-                                  "Visit this attraction for its heritage and cultural significance."),
-        "background": _clean_text(source.get("wikipedia_description") or source.get("description"),
-                                  "Detailed historical background is not available in the current travel data."),
-        "what_to_see": _clean_text(source.get("description"),
-                                    "See the main architectural features and notable points of interest."),
-        "travel_note": "Plan a comfortable pace with breaks because the trip preference is less walking.",
+        "why_visit": _clean_text(
+            source.get("why_visit") or source.get("description"),
+            "Visit this attraction for its heritage and cultural significance.",
+        ),
+        "background": _clean_text(
+            source.get("wikipedia_description") or source.get("description"),
+            "Detailed historical background is not available in the current travel data.",
+        ),
+        "what_to_see": _clean_text(
+            source.get("description"),
+            "See the main architectural features and notable points of interest.",
+        ),
+        "travel_note": "Plan a comfortable pace with breaks as needed.",
         "cost": {
             "type": "entry",
             "amount_per_person": 0,
@@ -2294,18 +1034,18 @@ def _force_priority_attractions(
     plan: Dict[str, Any],
     context: Dict[str, Any],
 ) -> None:
-    """Ensure major historical attractions are not merely mentioned as highlights."""
+    """Ensure major historical attractions are scheduled when requested."""
     query = _clean_text(context.get("trip", {}).get("user_query")).casefold()
     places = [p for p in context.get("places", []) if isinstance(p, dict)]
     if not places or not plan.get("days"):
         return
 
-    historical_request = any(word in query for word in ("historical", "history", "fort", "palace", "museum", "heritage"))
+    historical_request = any(
+        word in query for word in ("historical", "history", "fort", "palace", "museum", "heritage")
+    )
     if not historical_request:
         return
 
-    # These are examples of high-priority Hyderabad heritage attractions. Only
-    # force one when it is actually present in the backend place data.
     priority_terms = ("golconda fort", "salar jung museum", "charminar", "falaknuma palace")
     scheduled = {n.casefold() for n in _scheduled_activity_names(plan)}
 
@@ -2317,8 +1057,6 @@ def _force_priority_attractions(
                 candidates.append(place)
                 break
 
-    # Add at most two missing major attractions, replacing the lowest-priority
-    # final activities so the requested number of days does not change.
     for source in candidates[:2]:
         target_day = None
         target_section = None
@@ -2337,23 +1075,22 @@ def _force_priority_attractions(
             continue
         activities = [a for a in _as_list(target_section.get("activities")) if isinstance(a, dict)]
         if activities:
-            activities[-1] = _build_activity_from_source(source, _safe_int(context.get("trip", {}).get("travelers"), 2))
+            activities[-1] = _build_activity_from_source(
+                source, _safe_int(context.get("trip", {}).get("travelers"), 2)
+            )
             target_section["activities"] = activities
         scheduled.add(_clean_text(source.get("name")).casefold())
 
 
 def _repair_schedule(plan: Dict[str, Any], dates: List[str]) -> None:
     """Normalize meal/attraction blocks to a non-overlapping practical order."""
-    templates = [
-        ("09:00", "11:30", "12:00", "13:00", "14:00", "16:00", "16:15", "17:00", "17:30", "19:00", "19:30", "21:00"),
-    ]
+    t = ("09:00", "11:30", "12:00", "13:00", "14:00", "16:00", "16:15", "17:00", "17:30", "19:00", "19:30", "21:00")
     for i, day in enumerate(_as_list(plan.get("days"))):
         if not isinstance(day, dict):
             continue
         if i < len(dates):
             day["day"] = i + 1
             day["date"] = dates[i]
-        t = templates[0]
         morning = _ensure_dict(day, "morning")
         morning["start_time"], morning["end_time"] = t[0], t[1]
         lunch = _ensure_dict(day, "lunch")
@@ -2387,7 +1124,6 @@ def _repair_budget_math(plan: Dict[str, Any], travelers: int, budget: Optional[f
             if not isinstance(section, dict):
                 continue
             recs = [r for r in _as_list(section.get("recommendations")) if isinstance(r, dict)]
-            # Only rank 1 is counted. Alternatives are choices, not additional meals.
             if recs:
                 lo, hi = _cost_range(recs[0].get("cost"))
                 food_lo += lo
@@ -2474,7 +1210,6 @@ def _repair_plan(plan: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any
         if isinstance(g, dict)
     ]
 
-    # Exact number of calendar days. Never allow an extra LLM-created day.
     if dates:
         valid_days = [d for d in _as_list(plan.get("days")) if isinstance(d, dict)]
         plan["days"] = valid_days[:len(dates)]
@@ -2490,7 +1225,6 @@ def _repair_plan(plan: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any
         for activity in _all_activities(day):
             _repair_activity_content(activity, source_places)
 
-        # Set meal location from the attraction just completed when possible.
         afternoon_activities = _as_list(_ensure_dict(day, "afternoon").get("activities"))
         morning_activities = _as_list(_ensure_dict(day, "morning").get("activities"))
         last_morning = morning_activities[-1].get("place") if morning_activities else ""
@@ -2515,7 +1249,6 @@ def _repair_plan(plan: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any
             dinner["near"] = evening_near
         _repair_restaurant_section(dinner, restaurant_groups, "dinner")
 
-    # Highlights must come from places actually scheduled.
     scheduled = _scheduled_activity_names(plan)
     existing = {
         _clean_text(h.get("title")).casefold(): h
@@ -2531,13 +1264,12 @@ def _repair_plan(plan: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any
             "description": _clean_text(
                 item.get("description")
                 or source.get("why_visit")
-                or source.get("description")
+                or source.get("info")
                 or "A selected attraction in the itinerary."
             ),
         })
     plan["highlights"] = highlights
 
-    # Keep important places aligned with scheduled attractions.
     important = []
     for name in scheduled:
         source = source_places.get(name.casefold(), {})
@@ -2548,15 +1280,14 @@ def _repair_plan(plan: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any
         )
         important.append({
             "name": name,
-            "background": _clean_text(activity.get("background") or source.get("wikipedia_description") or source.get("description")),
-            "why_visit": _clean_text(activity.get("why_visit") or source.get("why_visit") or source.get("description")),
-            "what_to_see": _clean_text(activity.get("what_to_see") or source.get("description")),
+            "background": _clean_text(activity.get("background") or source.get("info")),
+            "why_visit": _clean_text(activity.get("why_visit") or source.get("why_visit") or source.get("info")),
+            "what_to_see": _clean_text(activity.get("what_to_see") or source.get("info")),
         })
     plan["important_places"] = important
 
     _repair_budget_math(plan, travelers, budget)
     return plan
-
 
 
 # ============================================================
@@ -2568,9 +1299,6 @@ def _normalize_legacy_day(day: Dict[str, Any], day_number: int) -> Dict[str, Any
     if not isinstance(day, dict):
         return {"day": day_number, "date": ""}
 
-    # Canonical schema is already present only when its activity/recommendation
-    # lists are actually present. Older responses sometimes used the same
-    # section names but stored a single nested `attraction` object.
     if (
         isinstance(day.get("morning"), dict)
         and isinstance(day.get("afternoon"), dict)
@@ -2595,7 +1323,6 @@ def _normalize_legacy_day(day: Dict[str, Any], day_number: int) -> Dict[str, Any
 
     attractions = [a for a in _as_list(day.get("attractions")) if isinstance(a, dict)]
     if not attractions:
-        # Some earlier responses used a single attraction object inside each period.
         for section_name in ("morning", "afternoon", "evening"):
             section = day.get(section_name)
             if isinstance(section, dict) and isinstance(section.get("attraction"), dict):
@@ -2635,7 +1362,6 @@ def _normalize_legacy_day(day: Dict[str, Any], day_number: int) -> Dict[str, Any
         if near:
             section["near"] = near
 
-    # A few historical outputs used one nested morning/afternoon attraction object.
     for section_name in ("morning", "afternoon"):
         source_section = day.get(section_name)
         if not isinstance(source_section, dict):
@@ -2648,7 +1374,6 @@ def _normalize_legacy_day(day: Dict[str, Any], day_number: int) -> Dict[str, Any
         if source_section.get("end_time"):
             normalized[section_name]["end_time"] = source_section["end_time"]
 
-    # Determine meal locations from the last completed attraction.
     morning_activities = normalized["morning"]["activities"]
     afternoon_activities = normalized["afternoon"]["activities"]
     if morning_activities and not normalized["lunch"].get("near"):
@@ -2673,35 +1398,27 @@ def _normalize_llm_plan_schema(plan: Dict[str, Any]) -> Dict[str, Any]:
     if days:
         plan["days"] = [_normalize_legacy_day(day, index + 1) for index, day in enumerate(days)]
 
-    # Historical trip summary fields are preserved but canonical fields are supplied.
     summary = _ensure_dict(plan, "trip_summary")
     if "budget" not in summary and plan.get("trip_budget", {}).get("budget_amount") is not None:
         summary["budget"] = plan["trip_budget"].get("budget_amount")
 
     return plan
 
+
 # ============================================================
-# NVIDIA TRAVEL-PLAN REQUEST
+# GROQ TRAVEL-PLAN REQUEST
 # ============================================================
 
-def _request_travel_plan_from_nvidia(
+def _request_travel_plan_from_groq(
     client: OpenAI,
     context: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """
-    Request the final JSON travel plan from NVIDIA NIM.
-
-    GPT-OSS is a reasoning model. The previous implementation allowed an
-    oversized 14,000-token completion, which is above NVIDIA's documented
-    Chat Completions limit for this endpoint and can also spend too much time
-    in reasoning before producing the JSON payload. Keep reasoning low and
-    bound the completion so the application does not appear to hang.
-    """
+    """Request the final JSON travel plan from Groq within TPM limits."""
 
     user_prompt = _build_user_prompt(context)
 
     response = client.chat.completions.create(
-        model=NVIDIA_MODEL,
+        model=GROQ_MODEL,
         messages=[
             {
                 "role": "system",
@@ -2714,27 +1431,25 @@ def _request_travel_plan_from_nvidia(
         ],
         temperature=0.2,
         reasoning_effort="low",
-        max_tokens=4096,
+        max_tokens=3500,
         response_format={"type": "json_object"},
         stream=False,
     )
 
     if not response.choices:
-        raise RuntimeError("NVIDIA returned no choices in the response.")
+        raise RuntimeError("Groq returned no choices in the response.")
 
     message = response.choices[0].message
     content = getattr(message, "content", None)
 
-    # GPT-OSS exposes reasoning separately. Never treat reasoning text as the
-    # final travel plan, but report it when the model produced no answer.
     if not content or not str(content).strip():
         reasoning = getattr(message, "reasoning_content", None)
         if reasoning:
             raise RuntimeError(
-                "NVIDIA returned reasoning content but no final JSON content. "
+                "Groq returned reasoning content but no final JSON content. "
                 "The completion limit was reached before the final answer."
             )
-        raise RuntimeError("NVIDIA returned an empty final response.")
+        raise RuntimeError("Groq returned an empty final response.")
 
     return _extract_json(str(content))
 
@@ -2774,16 +1489,13 @@ def generate_travel_plan(
         preferences=preferences,
     )
 
-    client = get_nvidia_client()
+    client = get_groq_client()
 
-    plan = _request_travel_plan_from_nvidia(
+    plan = _request_travel_plan_from_groq(
         client=client,
         context=context,
     )
 
-    # NVIDIA responses seen in earlier project runs used a different
-    # attractions/meals schema. Normalize it before validation so the
-    # frontend always receives the canonical structure.
     plan = _normalize_llm_plan_schema(plan)
     plan = _validate_travel_plan(plan)
     return _repair_plan(plan, context)

@@ -4,6 +4,7 @@ This module is intentionally kept as the orchestration layer. It does not
 contain LLM prompting or budget calculations. Those belong to llm_service.py.
 """
 
+import copy
 from typing import Any, Dict, List, Optional, Tuple
 
 from backend.tools.places import search_nearby_places
@@ -97,12 +98,16 @@ def _run_place_search(
     longitude: float,
 ) -> List[Dict[str, Any]]:
     """Search nearby places and always return a list."""
-    result = search_nearby_places(
-        latitude=latitude,
-        longitude=longitude,
-        radius=10000,
-    )
-    return [item for item in _safe_list(result) if isinstance(item, dict)]
+    try:
+        result = search_nearby_places(
+            latitude=latitude,
+            longitude=longitude,
+            radius=10000,
+        )
+        return [item for item in _safe_list(result) if isinstance(item, dict)]
+    except Exception as error:
+        print("Place search failed:", error)
+        return []
 
 
 def _run_filter_and_selection(
@@ -113,10 +118,13 @@ def _run_filter_and_selection(
     filtered = filter_and_rank_places(raw_places) or []
     filtered = [item for item in _safe_list(filtered) if isinstance(item, dict)]
 
-    selected = select_tourist_places(
-        filtered,
-        max_places=max(1, int(itinerary_places)),
-    ) or []
+    selected = (
+        select_tourist_places(
+            filtered,
+            max_places=max(1, int(itinerary_places)),
+        )
+        or []
+    )
     selected = [item for item in _safe_list(selected) if isinstance(item, dict)]
     return filtered, selected
 
@@ -127,11 +135,14 @@ def _run_enrichment(
     max_places: int,
 ) -> List[Dict[str, Any]]:
     """Add descriptions, Wikipedia/background data and place metadata."""
-    enriched = enrich_places(
-        places=places,
-        location_name=location_name,
-        max_places=max(1, int(max_places)),
-    ) or []
+    enriched = (
+        enrich_places(
+            places=places,
+            location_name=location_name,
+            max_places=max(1, int(max_places)),
+        )
+        or []
+    )
     return [item for item in _safe_list(enriched) if isinstance(item, dict)]
 
 
@@ -275,7 +286,7 @@ def build_travel_place_dataset(
     preferences: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the complete deterministic travel-data pipeline and LLM planner."""
-    data = {**DEFAULT_DATASET}
+    data = copy.deepcopy(DEFAULT_DATASET)
     data["user_query"] = user_query
     data["travelers"] = travelers
     data["budget"] = budget

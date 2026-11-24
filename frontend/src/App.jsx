@@ -2956,7 +2956,7 @@ final travel plan.`;
         <h3>🤖 AI Travel Planner</h3>
 
         <p>
-          Places • Routes • Weather • Restaurants • NVIDIA AI
+          Places • Routes • Weather • Restaurants • Groq AI
         </p>
       </footer>
     </div>
