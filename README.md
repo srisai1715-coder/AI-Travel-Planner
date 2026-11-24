@@ -13,6 +13,10 @@ The application is designed to take a traveler's destination, dates, preferences
 - **Backend Health Check:** [https://ai-travel-planner-1-qxvb.onrender.com/health](https://ai-travel-planner-1-qxvb.onrender.com/health)
 - **Live App Demo Video:** [Watch Demo Video](VIDEO/Watch%20Demo%20Video.mp4)
 
+## 🎥 Demo Video
+
+[Watch Full Demo Video](VIDEO/Watch%20Demo%20Video.mp4)
+
 ---
 
 ## 📌 Project Overview
