@@ -11,12 +11,22 @@ The application is designed to take a traveler's destination, dates, preferences
 - **Frontend (Vercel):** [https://ai-travel-planner-five-theta.vercel.app](https://ai-travel-planner-five-theta.vercel.app)
 - **Backend (Render):** [https://ai-travel-planner-1-qxvb.onrender.com](https://ai-travel-planner-1-qxvb.onrender.com)
 - **Backend Health Check:** [https://ai-travel-planner-1-qxvb.onrender.com/health](https://ai-travel-planner-1-qxvb.onrender.com/health)
-- **Live App Demo Video:** [Watch Demo Video](VIDEO/Watch%20Demo%20Video.mp4)
 
-## 🎥 Demo Video
 
-[Watch Full Demo Video](VIDEO/Watch%20Demo%20Video.mp4)
+# 🎥 Project Demo
 
+The uploaded screen recording demonstrates the AI Travel Planner interface and a **personalized budget-aware itinerary** workflow.
+
+### Demo video
+
+![AI Travel Planner Demo](VIDEO/ai-travel-planner-demo.gif)
+[▶️ Watch the full-quality demo video](VIDEO/Watch%20Demo%20Video.mp4)
+
+The demonstrated workflow includes:
+
+1. User selects destination, travel dates, budget, and preferences.
+2. Backend runs the 9-step travel pipeline (places, weather, route optimization, and nearby restaurants).
+3. Groq LLM (`openai/gpt-oss-120b`) generates the structured day-by-day itinerary and cost breakdown.
 ---
 
 ## 📌 Project Overview
